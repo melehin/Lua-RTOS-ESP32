@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/melehin/Lua-RTOS-ESP32.svg?branch=master)](https://travis-ci.org/melehin/Lua-RTOS-ESP32)
+
 # What's Lua RTOS?
 
 Lua RTOS is a real-time operating system designed to run on embedded systems, with minimal requirements of FLASH and RAM memory. Currently Lua RTOS is available for ESP32, ESP8266 and PIC32MZ platforms, and can be easilly ported to other 32-bit platforms.
