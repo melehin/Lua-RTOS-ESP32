@@ -3,11 +3,11 @@
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
- * and Eclipse Distribution License v1.0 which accompany this distribution. 
+ * and Eclipse Distribution License v1.0 which accompany this distribution.
  *
- * The Eclipse Public License is available at 
+ * The Eclipse Public License is available at
  *    http://www.eclipse.org/legal/epl-v10.html
- * and the Eclipse Distribution License is available at 
+ * and the Eclipse Distribution License is available at
  *   http://www.eclipse.org/org/documents/edl-v10.php.
  *
  * Contributors:
@@ -18,44 +18,66 @@
 #if !defined(SOCKET_H)
 #define SOCKET_H
 
-//#include <sys/types.h>
+#if !__XTENSA__
+#include <sys/types.h>
+#endif
 
 #if defined(WIN32) || defined(WIN64)
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #define MAXHOSTNAMELEN 256
 #if !defined(SSLSOCKET_H)
+#undef EAGAIN
 #define EAGAIN WSAEWOULDBLOCK
+#undef EINTR
 #define EINTR WSAEINTR
+#undef EINPROGRESS
 #define EINPROGRESS WSAEINPROGRESS
+#undef EWOULDBLOCK
 #define EWOULDBLOCK WSAEWOULDBLOCK
+#undef ENOTCONN
 #define ENOTCONN WSAENOTCONN
+#undef ECONNRESET
 #define ECONNRESET WSAECONNRESET
+#undef ETIMEDOUT
 #define ETIMEDOUT WAIT_TIMEOUT
 #endif
 #define ioctl ioctlsocket
 #define socklen_t int
 #else
 #define INVALID_SOCKET SOCKET_ERROR
+#include <sys/socket.h>
+#if !defined(_WRS_KERNEL)
+#include <sys/param.h>
+#include <sys/time.h>
+#if !__XTENSA__
+#include <sys/select.h>
+#include <sys/uio.h>
+#endif
+#else
+#if !__XTENSA__
+#include <selectLib.h>
+#endif
+#endif
+#if !__XTENSA__
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#else
 #include "lwip/sockets.h"
 #include "lwip/netdb.h"
-//#include <sys/socket.h>
-//#include <sys/param.h>
 #include <limits.h>
-#include <sys/time.h>
-//#include <sys/select.h>
-//#include <netinet/in.h>
-//#include <netinet/tcp.h>
-//#include <arpa/inet.h>
-//#include <netdb.h>
+#endif
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
-//#include <sys/uio.h>
 #define ULONG size_t
 #endif
+
+#include "mutex_type.h" /* Needed for mutex_type */
 
 /** socket operation completed successfully */
 #define TCPSOCKET_COMPLETE 0
@@ -65,7 +87,6 @@
 #endif
 /** must be the same as SOCKETBUFFER_INTERRUPTED */
 #define TCPSOCKET_INTERRUPTED -22
-#define TCPSOCKET_INTERRUPTED_FINAL -23
 #define SSL_FATAL -3
 
 #if !defined(INET6_ADDRSTRLEN)
@@ -117,7 +138,7 @@ typedef struct
 
 void Socket_outInitialize(void);
 void Socket_outTerminate(void);
-int Socket_getReadySocket(int more_work, struct timeval *tp);
+int Socket_getReadySocket(int more_work, struct timeval *tp, mutex_type mutex);
 int Socket_getch(int socket, char* c);
 char *Socket_getdata(int socket, size_t bytes, size_t* actual_len);
 int Socket_putdatas(int socket, char* buf0, size_t buf0len, int count, char** buffers, size_t* buflens, int* frees);
@@ -130,7 +151,7 @@ char* Socket_getpeer(int sock);
 void Socket_addPendingWrite(int socket);
 void Socket_clearPendingWrite(int socket);
 
-typedef void Socket_writeComplete(int socket);
+typedef void Socket_writeComplete(int socket, int rc);
 void Socket_setWriteCompleteCallback(Socket_writeComplete*);
 
 #endif /* SOCKET_H */

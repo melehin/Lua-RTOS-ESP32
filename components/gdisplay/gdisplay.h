@@ -1,30 +1,46 @@
 /*
- * Lua RTOS, graphic display
- *
- * Copyright (C) 2015 - 2016
- * IBEROXARXA SERVICIOS INTEGRALES, S.L
- *
- * Author: Jaume Olivé (jolive@iberoxarxa.com / jolive@whitecatboard.org)
+ * Copyright (C) 2015 - 2018, IBEROXARXA SERVICIOS INTEGRALES, S.L.
+ * Copyright (C) 2015 - 2018, Jaume Olivé Petrus (jolive@whitecatboard.org)
  *
  * All rights reserved.
  *
- * Permission to use, copy, modify, and distribute this software
- * and its documentation for any purpose and without fee is hereby
- * granted, provided that the above copyright notice appear in all
- * copies and that both that the copyright notice and this
- * permission notice and warranty disclaimer appear in supporting
- * documentation, and that the name of the author not be used in
- * advertising or publicity pertaining to distribution of the
- * software without specific, written prior permission.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- * The author disclaim all warranties with regard to this
- * software, including all implied warranties of merchantability
- * and fitness.  In no event shall the author be liable for any
- * special, indirect or consequential damages or any damages
- * whatsoever resulting from loss of use, data or profits, whether
- * in an action of contract, negligence or other tortious action,
- * arising out of or in connection with the use or performance of
- * this software.
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of the <organization> nor the
+ *       names of its contributors may be used to endorse or promote products
+ *       derived from this software without specific prior written permission.
+ *     * The WHITECAT logotype cannot be changed, you can remove it, but you
+ *       cannot change it in any way. The WHITECAT logotype is:
+ *
+ *          /\       /\
+ *         /  \_____/  \
+ *        /_____________\
+ *        W H I T E C A T
+ *
+ *     * Redistributions in binary form must retain all copyright notices printed
+ *       to any local or remote output device. This include any reference to
+ *       Lua RTOS, whitecatboard.org, Lua, and other copyright notices that may
+ *       appear in the future.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Lua RTOS, graphic display
+ *
  */
 
 #ifndef GDISPLAY_H
@@ -37,6 +53,7 @@
 #include <gdisplay/primitives/primitives.h>
 #include <gdisplay/fonts/font.h>
 #include <gdisplay/image/image.h>
+#include <gdisplay/qrcodegen/qrcodegen.h>
 
 #include <sys/driver.h>
 
@@ -44,6 +61,7 @@
 #include <drivers/ili9341.h>
 #include <drivers/st7735.h>
 #include <drivers/pcd8544.h>
+#include <drivers/ssd1306.h>
 
 /*
  * ST7735
@@ -71,7 +89,23 @@
  * ILI9341
  */
 
-#define CHIPSET_ILI9341 6
+#define CHIPSET_ILI9341    6
+
+/*
+ * PCD8544
+ */
+
+#define CHIPSET_PCD8544   7
+
+/*
+ * SSDS1306
+ */
+
+#define CHIPSET_SSD1306_128_32  8
+#define CHIPSET_SSD1306_128_64  9
+#define CHIPSET_SSD1306_96_16   10
+
+#define CHIPSET_SSD1306_VARIANT_OFFSET CHIPSET_SSD1306_128_32
 
 // Color definitions
 #define GDISPLAY_BLACK       0x0000      /*   0,   0,   0 */
@@ -118,12 +152,6 @@
 #define FONT_7SEG		7
 #define USER_FONT		8
 
-#define CHIPSET_ILI9341 6
-#define CHIPSET_PCD8544 7
-
-
-
-
 #define DEG_TO_RAD 0.01745329252
 #define RAD_TO_DEG 57.295779513
 #define deg_to_rad 0.01745329252 + 3.14159265359
@@ -146,27 +174,32 @@
 
 typedef struct {
 	uint8_t chipset; // Chipset
-	driver_error_t *(*init)(uint8_t, uint8_t);
+	driver_error_t *(*init)(uint8_t, uint8_t, uint8_t);
 } gdisplay_t;
 
 //  Driver errors
 #define  GDISPLAY_ERR_INVALID_CHIPSET             (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  0)
-#define  GDISPLAY_ERR_INVALID_COLOR            	  (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  1)
-#define  GDISPLAY_ERR_IS_NOT_SETUP            	  (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  2)
+#define  GDISPLAY_ERR_INVALID_COLOR               (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  1)
+#define  GDISPLAY_ERR_IS_NOT_SETUP                (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  2)
 #define  GDISPLAY_ERR_COLOR_REQUIRED              (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  3)
 #define  GDISPLAY_ERR_POINT_REQUIRED              (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  4)
 #define  GDISPLAY_ERR_NOT_ENOUGH_MEMORY           (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  5)
 #define  GDISPLAY_ERR_INVALID_RADIUS              (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  6)
 #define  GDISPLAY_ERR_INVALID_FONT                (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  7)
-#define  GDISPLAY_ERR_IMAGE                		  (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  8)
+#define  GDISPLAY_ERR_IMAGE                       (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  8)
 #define  GDISPLAY_ERR_OUT_OFF_SCREEN              (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  9)
 #define  GDISPLAY_ERR_INVALID_ORIENTATION         (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  10)
 #define  GDISPLAY_ERR_MISSING_FILE_NAME           (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  11)
 #define  GDISPLAY_ERR_IMG_PROCESSING_ERROR        (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  12)
 #define  GDISPLAY_ERR_BOOLEAN_REQUIRED            (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  13)
 #define  GDISPLAY_ERR_TOUCH_NOT_SUPPORTED         (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  14)
+#define  GDISPLAY_ERR_CANNOT_SETUP                (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  15)
+#define  GDISPLAY_ERR_QR_ENCODING_ERROR           (DRIVER_EXCEPTION_BASE(GDISPLAY_DRIVER_ID) |  16)
 
-driver_error_t *gdisplay_init(uint8_t chipset, uint8_t orientation, uint8_t buffered);
+extern const int gdisplay_errors;
+extern const int gdisplay_error_map;
+
+driver_error_t *gdisplay_init(uint8_t chipset, uint8_t orientation, uint8_t buffered, uint8_t address);
 uint8_t gdisplay_is_init();
 void gdisplay_begin();
 void gdisplay_end();
@@ -222,5 +255,7 @@ driver_error_t *gdisplay_touch_set_cal(int x, int y);
 
 driver_error_t *gdisplay_lock();
 driver_error_t *gdisplay_unlock();
+
+const gdisplay_t *gdisplay_get(uint8_t chipset);
 
 #endif	/* GDISPLAY_H */

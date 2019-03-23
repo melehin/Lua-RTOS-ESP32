@@ -1,13 +1,13 @@
 /*******************************************************************************
- * Copyright (c) 2009, 2014 IBM Corp.
+ * Copyright (c) 2009, 2017 IBM Corp.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
- * and Eclipse Distribution License v1.0 which accompany this distribution. 
+ * and Eclipse Distribution License v1.0 which accompany this distribution.
  *
- * The Eclipse Public License is available at 
+ * The Eclipse Public License is available at
  *    http://www.eclipse.org/legal/epl-v10.html
- * and the Eclipse Distribution License is available at 
+ * and the Eclipse Distribution License is available at
  *   http://www.eclipse.org/org/documents/edl-v10.php.
  *
  * Contributors:
@@ -15,6 +15,7 @@
  *    Ian Craggs, Allan Stockdill-Mander - async client updates
  *    Ian Craggs - bug #415042 - start Linux thread as disconnected
  *    Ian Craggs - fix for bug #420851
+ *    Ian Craggs - change MacOS semaphore implementation
  *******************************************************************************/
 
 /**
@@ -35,10 +36,7 @@
 #undef realloc
 #undef free
 
-#include "lwip/sys.h"
-
 #if !defined(WIN32) && !defined(WIN64)
-#include <stdint.h>
 #include <errno.h>
 #include <unistd.h>
 #include <sys/time.h>
@@ -48,6 +46,8 @@
 #include <limits.h>
 #endif
 #include <stdlib.h>
+
+#include "OsWrapper.h"
 
 /**
  * Start a new thread
@@ -70,9 +70,23 @@ thread_type Thread_start(thread_fn fn, void* parameter)
 #else
 	pthread_attr_init(&attr);
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+	if (!parameter) {
+	    pthread_attr_setstacksize(&attr, 3072);
+	} else {
+        pthread_attr_setstacksize(&attr, CONFIG_LUA_RTOS_LUA_THREAD_STACK_SIZE - 3072);
+	}
+
 	if (pthread_create(&thread, &attr, fn, parameter) != 0)
 		thread = 0;
 	pthread_attr_destroy(&attr);
+
+    if (!parameter) {
+        pthread_setname_np(thread,"mqtt_snd");
+    } else {
+        pthread_setname_np(thread,"mqtt_rcv");
+    }
+
 #endif
 	FUNC_EXIT;
 	return thread;
@@ -83,7 +97,7 @@ thread_type Thread_start(thread_fn fn, void* parameter)
  * Create a new mutex
  * @return the new mutex
  */
-mutex_type Thread_create_mutex()
+mutex_type Thread_create_mutex(void)
 {
 	mutex_type mutex = NULL;
 	int rc = 0;
@@ -91,19 +105,22 @@ mutex_type Thread_create_mutex()
 	FUNC_ENTRY;
 	#if defined(WIN32) || defined(WIN64)
 		mutex = CreateMutex(NULL, 0, NULL);
+		if (mutex == NULL)
+			rc = GetLastError();
 	#else
 		mutex = malloc(sizeof(pthread_mutex_t));
+		#if !__XTENSA__
+		*mutex = PTHREAD_MUTEX_INITIALIZER;
+		#endif
 		rc = pthread_mutex_init(mutex, NULL);
 	#endif
 	FUNC_EXIT_RC(rc);
-	(void) rc;
 	return mutex;
 }
 
 
 /**
- * Lock a mutex which has already been created, block until ready
- * @param mutex the mutex
+ * Lock a mutex which has alrea
  * @return completion code, 0 is success
  */
 int Thread_lock_mutex(mutex_type mutex)
@@ -162,7 +179,6 @@ void Thread_destroy_mutex(mutex_type mutex)
 		free(mutex);
 	#endif
 	FUNC_EXIT_RC(rc);
-	(void) rc;
 }
 
 
@@ -170,7 +186,7 @@ void Thread_destroy_mutex(mutex_type mutex)
  * Get the thread id of the thread from which this function is called
  * @return thread id, type varying according to OS
  */
-thread_id_type Thread_getid()
+thread_id_type Thread_getid(void)
 {
 	#if defined(WIN32) || defined(WIN64)
 		return GetCurrentThreadId();
@@ -180,35 +196,34 @@ thread_id_type Thread_getid()
 }
 
 
-#if defined(USE_NAMED_SEMAPHORES)
-#define MAX_NAMED_SEMAPHORES 10
-
-static int named_semaphore_count = 0;
-
-static struct 
-{
-	sem_type sem;
-	char name[NAME_MAX-4];
-} named_semaphores[MAX_NAMED_SEMAPHORES];
- 
-#endif
-
-
 /**
  * Create a new semaphore
  * @return the new condition variable
  */
-sem_type Thread_create_sem()
+sem_type Thread_create_sem(void)
 {
 	sem_type sem = NULL;
 	int rc = 0;
 
 	FUNC_ENTRY;
-
-        rc = sys_sem_new((sys_sem_t *)&sem, 0);
-
+	#if defined(WIN32) || defined(WIN64)
+		sem = CreateEvent(
+		        NULL,               /* default security attributes */
+		        FALSE,              /* manual-reset event? */
+		        FALSE,              /* initial state is nonsignaled */
+		        NULL                /* object name */
+		        );
+	#elif defined(OSX)
+		sem = dispatch_semaphore_create(0L);
+		rc = (sem == NULL) ? -1 : 0;
+	#elif __XTENSA__
+		sem = xSemaphoreCreateCounting(10,0);
+		rc = sem?0:-1;
+	#else
+		sem = malloc(sizeof(sem_t));
+		rc = sem_init(sem, 0, 0);
+	#endif
 	FUNC_EXIT_RC(rc);
-	(void) rc;
 	return sem;
 }
 
@@ -221,21 +236,50 @@ sem_type Thread_create_sem()
  */
 int Thread_wait_sem(sem_type sem, int timeout)
 {
-    uint32_t rc = -1;
+/* sem_timedwait is the obvious call to use, but seemed not to work on the Viper,
+ * so I've used trywait in a loop instead. Ian Craggs 23/7/2010
+ */
+	int rc = -1;
+#if !defined(WIN32) && !defined(WIN64) && !defined(OSX) && !defined(__XTENSA__)
+#define USE_TRYWAIT
+#if defined(USE_TRYWAIT)
+	int i = 0;
+	int interval = 10000; /* 10000 microseconds: 10 milliseconds */
+	int count = (1000 * timeout) / interval; /* how many intervals in timeout period */
+#else
+	struct timespec ts;
+#endif
+#endif
 
-    FUNC_ENTRY;
-
-    rc = sys_arch_sem_wait(sem, timeout);
-
-    if (rc == 0xffffffffUL) {
-        rc = -1;
-    } else {
-        rc = 0;
+	FUNC_ENTRY;
+	#if defined(WIN32) || defined(WIN64)
+		rc = WaitForSingleObject(sem, timeout < 0 ? 0 : timeout);
+    #elif defined(OSX)
+		rc = (int)dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)timeout*1000000L));
+	#elif defined(USE_TRYWAIT)
+		while (++i < count && (rc = sem_trywait(sem)) != 0)
+		{
+			if (rc == -1 && ((rc = errno) != EAGAIN))
+			{
+				rc = 0;
+				break;
+			}
+			usleep(interval); /* microseconds - .1 of a second */
+		}
+	#elif __XTENSA__
+	if (xSemaphoreTake(sem, timeout / portTICK_PERIOD_MS) == pdTRUE) {
+    	rc = 0;
     }
+	#else
+		if (clock_gettime(CLOCK_REALTIME, &ts) != -1)
+		{
+			ts.tv_sec += timeout;
+			rc = sem_timedwait(sem, &ts);
+		}
+	#endif
 
-    FUNC_EXIT_RC((int)rc);
-    return (int)rc;
-
+ 	FUNC_EXIT_RC(rc);
+ 	return rc;
 }
 
 
@@ -246,14 +290,17 @@ int Thread_wait_sem(sem_type sem, int timeout)
  */
 int Thread_check_sem(sem_type sem)
 {
-    if (xSemaphoreTake(sem,0) == pdTRUE) {
-        xSemaphoreGive(sem);
-
-        return 1;
-    } else {
-        return 0;
-    }
-    return 0;
+#if defined(WIN32) || defined(WIN64)
+	return WaitForSingleObject(sem, 0) == WAIT_OBJECT_0;
+#elif defined(OSX)
+  return dispatch_semaphore_wait(sem, DISPATCH_TIME_NOW) == 0;
+#elif __XTENSA__
+  return (uxSemaphoreGetCount(sem) > 0);
+#else
+	int semval = -1;
+	sem_getvalue(sem, &semval);
+	return semval > 0;
+#endif
 }
 
 
@@ -264,15 +311,23 @@ int Thread_check_sem(sem_type sem)
  */
 int Thread_post_sem(sem_type sem)
 {
-    int rc = 0;
+	int rc = 0;
 
-    FUNC_ENTRY;
+	FUNC_ENTRY;
+	#if defined(WIN32) || defined(WIN64)
+		if (SetEvent(sem) == 0)
+			rc = GetLastError();
+	#elif defined(OSX)
+		rc = (int)dispatch_semaphore_signal(sem);
+	#elif __XTENSA__
+		xSemaphoreGive(sem);
+	#else
+		if (sem_post(sem) == -1)
+			rc = errno;
+	#endif
 
-    sys_sem_signal(sem);
-
-    FUNC_EXIT_RC(rc);
-
-    return rc;
+ 	FUNC_EXIT_RC(rc);
+  return rc;
 }
 
 
@@ -282,15 +337,21 @@ int Thread_post_sem(sem_type sem)
  */
 int Thread_destroy_sem(sem_type sem)
 {
-    int rc = 0;
+	int rc = 0;
 
-    FUNC_ENTRY;
-
-    sys_sem_free(sem);
-
-    FUNC_EXIT_RC(rc);
-
-    return rc;
+	FUNC_ENTRY;
+	#if defined(WIN32) || defined(WIN64)
+		rc = CloseHandle(sem);
+    #elif defined(OSX)
+	  dispatch_release(sem);
+	#elif __XTENSA__
+	  vSemaphoreDelete(sem);
+	#else
+		rc = sem_destroy(sem);
+		free(sem);
+	#endif
+	FUNC_EXIT_RC(rc);
+	return rc;
 }
 
 
@@ -299,7 +360,7 @@ int Thread_destroy_sem(sem_type sem)
  * Create a new condition variable
  * @return the condition variable struct
  */
-cond_type Thread_create_cond()
+cond_type Thread_create_cond(void)
 {
 	cond_type condvar = NULL;
 	int rc = 0;
@@ -310,7 +371,6 @@ cond_type Thread_create_cond()
 	rc = pthread_mutex_init(&condvar->mutex, NULL);
 
 	FUNC_EXIT_RC(rc);
-	(void) rc;
 	return condvar;
 }
 
@@ -326,6 +386,7 @@ int Thread_signal_cond(cond_type condvar)
 	rc = pthread_cond_signal(&condvar->cond);
 	pthread_mutex_unlock(&condvar->mutex);
 
+    FUNC_EXIT_RC(rc);
 	return rc;
 }
 
@@ -365,6 +426,7 @@ int Thread_destroy_cond(cond_type condvar)
 	rc = pthread_cond_destroy(&condvar->cond);
 	free(condvar);
 
+    FUNC_EXIT_RC(rc);
 	return rc;
 }
 #endif

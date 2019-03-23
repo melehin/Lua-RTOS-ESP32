@@ -35,6 +35,8 @@
 #include "lwip/ip_addr.h"
 #include "lwip/udp.h"
 #include "lwip/pbuf.h"
+#include "lwip/tcpip.h"
+#include "lwip/priv/tcpip_priv.h"
 
 #include "esp_wifi_types.h"
 #include "tcpip_adapter.h"
@@ -81,41 +83,69 @@ static u8_t captivedns_pcb_refcount;
 static void captivedns_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port);
 driver_error_t *wifi_check_error(esp_err_t error);
 
+typedef struct {
+    struct tcpip_api_call_data call;
+    esp_err_t err;
+} captive_api_call_t;
+
 /** Ensure captivedns PCB is allocated and bound */
 static err_t
-captivedns_inc_pcb_refcount(void)
+captivedns_inc_pcb_refcount(struct tcpip_api_call_data *api_call_msg)
 {
+  captive_api_call_t * msg = (captive_api_call_t *)api_call_msg;
+
   if(captivedns_pcb_refcount == 0) {
     LWIP_ASSERT("captivedns_inc_pcb_refcount(): memory leak", captivedns_pcb == NULL);
 
+    LOCK_TCPIP_CORE()
+
     /* allocate UDP PCB */
-    captivedns_pcb = udp_new();
+    captivedns_pcb = udp_new(); // NOTE regarding possible crashes with TCP: https://github.com/espressif/esp-idf/issues/2113#issuecomment-405777313
+                                // not 100% sure about UDP - but to be safe let's use TCPIP_CORE locking
 
     if(captivedns_pcb == NULL) {
-      return ERR_MEM;
+      UNLOCK_TCPIP_CORE()
+      msg->err = ERR_MEM;
+      return msg->err;
     }
 
     /* set up local port for the pcb -> listen on all interfaces on all src/dest IPs */
-    udp_bind(captivedns_pcb, IP_ADDR_ANY, PORT);
-    udp_recv(captivedns_pcb, captivedns_recv, NULL);
+    if (udp_bind(captivedns_pcb, IP_ADDR_ANY, PORT) != 0) {
+      udp_remove(captivedns_pcb);
+      captivedns_pcb = NULL;
+      UNLOCK_TCPIP_CORE()
+      msg->err = ESP_ERR_INVALID_STATE;
+      return msg->err;
+    }
 
-		//we only need one captivedns pcb
-	  captivedns_pcb_refcount++;
+    udp_recv(captivedns_pcb, captivedns_recv, NULL);
+    UNLOCK_TCPIP_CORE()
+
+    //we only need one captivedns pcb
+    captivedns_pcb_refcount++;
   }
 
+  msg->err = ESP_OK;
   return ERR_OK;
 }
 
 /** Free captivedns PCB if the last netif stops using it */
-static void
-captivedns_dec_pcb_refcount(void)
+static err_t
+captivedns_dec_pcb_refcount(struct tcpip_api_call_data *api_call_msg)
 {
+  captive_api_call_t * msg = (captive_api_call_t *)api_call_msg;
+
   if(captivedns_pcb_refcount) {
-	  captivedns_pcb_refcount--;
-	  
+    captivedns_pcb_refcount--;
+
+    LOCK_TCPIP_CORE()
     udp_remove(captivedns_pcb);
     captivedns_pcb = NULL;
+    UNLOCK_TCPIP_CORE()
   }
+
+  msg->err = ESP_OK;
+  return ERR_OK;
 }
 
 /**
@@ -137,71 +167,84 @@ captivedns_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t 
       dnsHeader->QR = DNS_QR_RESPONSE;
       dnsHeader->ANCount = dnsHeader->QDCount;
 
-      struct pbuf *p_out;
-      p_out = pbuf_alloc(PBUF_TRANSPORT, p->len + 16, PBUF_RAM);
-      pbuf_take(p_out, p->payload, p->len); //cannot use tot_len here
+      struct pbuf *p_out = pbuf_alloc(PBUF_TRANSPORT, p->len + 16, PBUF_RAM);
+      if (NULL != p_out) {
+        pbuf_take(p_out, p->payload, p->len); //cannot use tot_len here
 
-      u16_t position = p->len - 1;
-      pbuf_put_at(p_out, ++position, (uint8_t)192); // answer name is a pointer
-      pbuf_put_at(p_out, ++position, (uint8_t)12);  // pointer to offset at 0x00c
+        u16_t position = p->len - 1;
+        pbuf_put_at(p_out, ++position, (uint8_t)192); // answer name is a pointer
+        pbuf_put_at(p_out, ++position, (uint8_t)12);  // pointer to offset at 0x00c
 
-      pbuf_put_at(p_out, ++position, (uint8_t)0);   // 0x0001  answer is type A query (host address)
-      pbuf_put_at(p_out, ++position, (uint8_t)1);
+        pbuf_put_at(p_out, ++position, (uint8_t)0);   // 0x0001  answer is type A query (host address)
+        pbuf_put_at(p_out, ++position, (uint8_t)1);
 
-      pbuf_put_at(p_out, ++position, (uint8_t)0);   // 0x0001 answer is class IN (internet address)
-      pbuf_put_at(p_out, ++position, (uint8_t)1);
+        pbuf_put_at(p_out, ++position, (uint8_t)0);   // 0x0001 answer is class IN (internet address)
+        pbuf_put_at(p_out, ++position, (uint8_t)1);
 
-      pbuf_put_at(p_out, ++position, (uint8_t)0);   // fixed TTL of zero
-      pbuf_put_at(p_out, ++position, (uint8_t)0);
-      pbuf_put_at(p_out, ++position, (uint8_t)0);
-      pbuf_put_at(p_out, ++position, (uint8_t)0);
+        pbuf_put_at(p_out, ++position, (uint8_t)0);   // fixed TTL of zero
+        pbuf_put_at(p_out, ++position, (uint8_t)0);
+        pbuf_put_at(p_out, ++position, (uint8_t)0);
+        pbuf_put_at(p_out, ++position, (uint8_t)0);
 
-      pbuf_put_at(p_out, ++position, (uint8_t)0);   // length of RData is 4 bytes (because, in this case, RData is IPv4)
-      pbuf_put_at(p_out, ++position, (uint8_t)4);
+        pbuf_put_at(p_out, ++position, (uint8_t)0);   // length of RData is 4 bytes (because, in this case, RData is IPv4)
+        pbuf_put_at(p_out, ++position, (uint8_t)4);
 
-      //esp32 ip addr
-      pbuf_put_at(p_out, ++position, (uint8_t)ip4_addr1(&esp_info.ip));
-      pbuf_put_at(p_out, ++position, (uint8_t)ip4_addr2(&esp_info.ip));
-      pbuf_put_at(p_out, ++position, (uint8_t)ip4_addr3(&esp_info.ip));
-      pbuf_put_at(p_out, ++position, (uint8_t)ip4_addr4(&esp_info.ip));
+        //esp32 ip addr
+        pbuf_put_at(p_out, ++position, (uint8_t)ip4_addr1(&esp_info.ip));
+        pbuf_put_at(p_out, ++position, (uint8_t)ip4_addr2(&esp_info.ip));
+        pbuf_put_at(p_out, ++position, (uint8_t)ip4_addr3(&esp_info.ip));
+        pbuf_put_at(p_out, ++position, (uint8_t)ip4_addr4(&esp_info.ip));
 
-      udp_sendto_if(captivedns_pcb, p_out, addr, port, netif);
-      pbuf_free(p_out);
+        LOCK_TCPIP_CORE()
+        udp_sendto_if(captivedns_pcb, p_out, addr, port, netif);
+        UNLOCK_TCPIP_CORE()
+
+        pbuf_free(p_out);
+
+      }
   }
 
   pbuf_free(p);
 }
 
 int captivedns_start(lua_State* L) {
-	driver_error_t *error;
+  driver_error_t *error;
 
-	uint8_t mode;
-	if ((error = wifi_check_error(esp_wifi_get_mode((wifi_mode_t*)&mode)))) {
-		return luaL_error(L, "couldn't get wifi mode");
-	}
-	
-	if (mode == WIFI_MODE_STA) {
-		return luaL_error(L, "wrong wifi mode");
-	}
+  wifi_mode_t mode;
+  if ((error = wifi_check_error(esp_wifi_get_mode(&mode)))) {
+    free(error);
+    return luaL_error(L, "couldn't get wifi mode");
+  }
+  
+  if (mode == WIFI_MODE_STA) {
+    return luaL_error(L, "wrong wifi mode");
+  }
 
-	// get WIFI IF info
-	if ((error = wifi_check_error(tcpip_adapter_get_ip_info(ESP_IF_WIFI_AP, &esp_info)))) {
-		return luaL_error(L, "couldn't get interface information");
-	}
-	
-	if(captivedns_inc_pcb_refcount()!=ERR_OK) {
-		return luaL_error(L, "couldn't start captivedns service");
-	}
-	
-	return 0;
+  // get WIFI IF info
+  if ((error = wifi_check_error(tcpip_adapter_get_ip_info(ESP_IF_WIFI_AP, &esp_info)))) {
+    free(error);
+    return luaL_error(L, "couldn't get interface information");
+  }
+  
+  captive_api_call_t msg = {
+  };
+  tcpip_api_call(captivedns_inc_pcb_refcount, (struct tcpip_api_call_data*)&msg);
+
+  if(msg.err!=ERR_OK) {
+    return luaL_error(L, "couldn't start captivedns service");
+  }
+  
+  return 0;
 }
 
 void captivedns_stop() {
-	captivedns_dec_pcb_refcount();
+  captive_api_call_t msg = {
+  };
+  tcpip_api_call(captivedns_dec_pcb_refcount, (struct tcpip_api_call_data*)&msg);
 }
 
 int captivedns_running() {
-	return (captivedns_pcb_refcount>0 ? 1 : 0);
+  return (captivedns_pcb_refcount>0 ? 1 : 0);
 }
 
 #endif

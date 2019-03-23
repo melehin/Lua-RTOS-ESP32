@@ -1,30 +1,46 @@
 /*
- * Lua RTOS, graphic display
- *
- * Copyright (C) 2015 - 2016
- * IBEROXARXA SERVICIOS INTEGRALES, S.L.
- *
- * Author: Jaume Olivé (jolive@iberoxarxa.com / jolive@whitecatboard.org)
+ * Copyright (C) 2015 - 2018, IBEROXARXA SERVICIOS INTEGRALES, S.L.
+ * Copyright (C) 2015 - 2018, Jaume Olivé Petrus (jolive@whitecatboard.org)
  *
  * All rights reserved.
  *
- * Permission to use, copy, modify, and distribute this software
- * and its documentation for any purpose and without fee is hereby
- * granted, provided that the above copyright notice appear in all
- * copies and that both that the copyright notice and this
- * permission notice and warranty disclaimer appear in supporting
- * documentation, and that the name of the author not be used in
- * advertising or publicity pertaining to distribution of the
- * software without specific, written prior permission.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
  *
- * The author disclaim all warranties with regard to this
- * software, including all implied warranties of merchantability
- * and fitness.  In no event shall the author be liable for any
- * special, indirect or consequential damages or any damages
- * whatsoever resulting from loss of use, data or profits, whether
- * in an action of contract, negligence or other tortious action,
- * arising out of or in connection with the use or performance of
- * this software.
+ *     * Redistributions of source code must retain the above copyright
+ *       notice, this list of conditions and the following disclaimer.
+ *     * Redistributions in binary form must reproduce the above copyright
+ *       notice, this list of conditions and the following disclaimer in the
+ *       documentation and/or other materials provided with the distribution.
+ *     * Neither the name of the <organization> nor the
+ *       names of its contributors may be used to endorse or promote products
+ *       derived from this software without specific prior written permission.
+ *     * The WHITECAT logotype cannot be changed, you can remove it, but you
+ *       cannot change it in any way. The WHITECAT logotype is:
+ *
+ *          /\       /\
+ *         /  \_____/  \
+ *        /_____________\
+ *        W H I T E C A T
+ *
+ *     * Redistributions in binary form must retain all copyright notices printed
+ *       to any local or remote output device. This include any reference to
+ *       Lua RTOS, whitecatboard.org, Lua, and other copyright notices that may
+ *       appear in the future.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
+ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Lua RTOS, graphic display
+ *
  */
 
 #include "sdkconfig.h"
@@ -35,7 +51,10 @@
 
 #include <gdisplay/gdisplay.h>
 
-#include <pthread/pthread.h>
+#include <drivers/gpio.h>
+#include <drivers/power_bus.h>
+
+#include <pthread.h>
 
 static uint8_t init = 0;
 
@@ -62,13 +81,16 @@ static uint8_t nested = 0;		   // Display is only updated when nested == 0
 
 // Supported display devices
 static const gdisplay_t displaydevs[] = {
-	{CHIPSET_PCD8544,     pcd8544_init},
-	{CHIPSET_ST7735,      st7735_init },
-	{CHIPSET_ST7735B,     st7735_init },
-	{CHIPSET_ST7735G,     st7735_init },
-	{CHIPSET_ST7735G_144, st7735_init },
-	{CHIPSET_ST7735_096 , st7735_init },
-	{CHIPSET_ILI9341,     ili9341_init},
+	{CHIPSET_PCD8544,        pcd8544_init},
+	{CHIPSET_ST7735,         st7735_init },
+	{CHIPSET_ST7735B,        st7735_init },
+	{CHIPSET_ST7735G,        st7735_init },
+	{CHIPSET_ST7735G_144,    st7735_init },
+	{CHIPSET_ST7735_096 ,    st7735_init },
+	{CHIPSET_ILI9341,        ili9341_init},
+	{CHIPSET_SSD1306_128_32, ssd1306_init},
+	{CHIPSET_SSD1306_128_64, ssd1306_init},
+	{CHIPSET_SSD1306_96_16,  ssd1306_init},
 	{NULL}
 };
 
@@ -88,7 +110,7 @@ static dispWin_t dispWin = {
 };
 
 // Register driver and messages
-DRIVER_REGISTER_BEGIN(GDISPLAY,gdisplay,NULL,NULL,NULL);
+DRIVER_REGISTER_BEGIN(GDISPLAY,gdisplay,0,NULL,NULL);
 	DRIVER_REGISTER_ERROR(GDISPLAY, gdisplay, InvalidChipset, "invalid chipset", GDISPLAY_ERR_INVALID_CHIPSET);
 	DRIVER_REGISTER_ERROR(GDISPLAY, gdisplay, InvalidColor, "invalid color", GDISPLAY_ERR_INVALID_COLOR);
 	DRIVER_REGISTER_ERROR(GDISPLAY, gdisplay, NotSetup, "is not setup", GDISPLAY_ERR_IS_NOT_SETUP);
@@ -104,7 +126,9 @@ DRIVER_REGISTER_BEGIN(GDISPLAY,gdisplay,NULL,NULL,NULL);
 	DRIVER_REGISTER_ERROR(GDISPLAY, gdisplay, ProcessingError, "image processing error", GDISPLAY_ERR_IMG_PROCESSING_ERROR);
 	DRIVER_REGISTER_ERROR(GDISPLAY, gdisplay, BooleanRequired, "boolean required", GDISPLAY_ERR_BOOLEAN_REQUIRED);
 	DRIVER_REGISTER_ERROR(GDISPLAY, gdisplay, TouchNotSupported, "touch pad not supported in this display", GDISPLAY_ERR_TOUCH_NOT_SUPPORTED);
-DRIVER_REGISTER_END(GDISPLAY,gdisplay,NULL,NULL,NULL);
+	DRIVER_REGISTER_ERROR(GDISPLAY, gdisplay, CannotSetup, "can't setup", GDISPLAY_ERR_TOUCH_NOT_SUPPORTED);
+	DRIVER_REGISTER_ERROR(GDISPLAY, gdisplay, QREncodeError, "qrcode encode error", GDISPLAY_ERR_QR_ENCODING_ERROR);
+DRIVER_REGISTER_END(GDISPLAY,gdisplay,0,NULL,NULL);
 
 /*
  * Helper functions
@@ -182,7 +206,7 @@ driver_error_t *gdisplay_get_pixel(int x, int y, uint32_t *color) {
 	return NULL;
 }
 
-static const gdisplay_t *gdisplay_get(uint8_t chipset) {
+const gdisplay_t *gdisplay_get(uint8_t chipset) {
 	const gdisplay_t *cdisplay;
 	int i = 0;
 
@@ -200,9 +224,14 @@ static const gdisplay_t *gdisplay_get(uint8_t chipset) {
 }
 
 // Init display
-driver_error_t *gdisplay_init(uint8_t chipset, uint8_t orient, uint8_t buffered) {
+driver_error_t *gdisplay_init(uint8_t chipset, uint8_t orient, uint8_t buffered, uint8_t address) {
 	driver_error_t *error;
 	gdisplay_t *display;
+
+	// Sanity checks
+	if ((orient != PORTRAIT) && (orient != PORTRAIT_FLIP) && (orient != LANDSCAPE) && (orient != LANDSCAPE_FLIP)) {
+		return driver_error(GDISPLAY_DRIVER, GDISPLAY_ERR_INVALID_ORIENTATION, NULL);
+	}
 
 	if (init) {
 		// Flush all
@@ -212,13 +241,15 @@ driver_error_t *gdisplay_init(uint8_t chipset, uint8_t orient, uint8_t buffered)
 
 		nested = 0;
 
+		gdisplay_set_orientation(orient);
+
 		return NULL;
 	}
 
-	// Sanity checks
-	if ((orient != PORTRAIT) && (orient != PORTRAIT_FLIP) && (orient != LANDSCAPE) && (orient != LANDSCAPE_FLIP)) {
-		return driver_error(GDISPLAY_DRIVER, GDISPLAY_ERR_INVALID_ORIENTATION, NULL);
-	}
+#if CONFIG_LUA_RTOS_GDISPLAY_BACKLIGHT >= 0
+	gpio_pin_output(CONFIG_LUA_RTOS_GDISPLAY_BACKLIGHT);
+	gpio_pin_clr(CONFIG_LUA_RTOS_GDISPLAY_BACKLIGHT);
+#endif
 
 	// Get display data
 	display = (gdisplay_t *)gdisplay_get(chipset);
@@ -229,7 +260,11 @@ driver_error_t *gdisplay_init(uint8_t chipset, uint8_t orient, uint8_t buffered)
 	cursorx = 0;
 	cursory = 0;
 
-	error = (display->init)(chipset, orient);
+#if CONFIG_LUA_RTOS_GDISPLAY_CONNECTED_TO_POWER_BUS || CONFIG_LUA_RTOS_GDISPLAY_I2C_CONNECTED_TO_POWER_BUS
+    pwbus_on();
+#endif
+
+	error = (display->init)(chipset, orient, address);
 	if (error) {
 		return error;
 	}
@@ -237,7 +272,7 @@ driver_error_t *gdisplay_init(uint8_t chipset, uint8_t orient, uint8_t buffered)
 	// Create frame buffer
 	gdisplay_caps_t *caps = gdisplay_ll_get_caps();
 
-	if (buffered) {
+	if (buffered || (caps->bytes_per_pixel == 0)) {
 		if (caps->bytes_per_pixel > 0) {
 			buffer = calloc(caps->width * caps->height, caps->bytes_per_pixel);
 		} else {
@@ -496,10 +531,10 @@ driver_error_t *gdisplay_clear(uint32_t color) {
 	cursorx = 0;
 	cursory = 0;
 
-	rotation = 0;
-	wrap = 0;
-	transparent = 1;
-	force_fixed = 0;
+	//rotation = 0;
+	//wrap = 0;
+	//transparent = 1;
+	//force_fixed = 0;
 
 	dispWin.x1 = 0;
 	dispWin.y1 = 0;
@@ -517,6 +552,10 @@ driver_error_t *gdisplay_on() {
 
 	gdisplay_ll_on();
 
+#if CONFIG_LUA_RTOS_GDISPLAY_BACKLIGHT >= 0
+	gpio_pin_clr(CONFIG_LUA_RTOS_GDISPLAY_BACKLIGHT);
+#endif
+
 	return NULL;
 }
 
@@ -527,6 +566,10 @@ driver_error_t *gdisplay_off() {
 	}
 
 	gdisplay_ll_off();
+
+#if CONFIG_LUA_RTOS_GDISPLAY_BACKLIGHT >= 0
+	gpio_pin_set(CONFIG_LUA_RTOS_GDISPLAY_BACKLIGHT);
+#endif
 
 	return NULL;
 }
